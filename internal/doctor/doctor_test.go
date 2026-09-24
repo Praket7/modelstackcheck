@@ -6,14 +6,32 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"image/png"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+func newMockClient(t *testing.T, scenario string) *apiClient {
+	t.Helper()
+	server := httptest.NewServer(mockHandler(scenario))
+	t.Cleanup(server.Close)
+	return &apiClient{base: server.URL + "/v1", model: "modelstackcheck-mock", http: server.Client()}
+}
+
+func diagnosisCode(report *Report, code string) *Diagnosis {
+	for index := range report.Diagnoses {
+		if report.Diagnoses[index].Code == code {
+			return &report.Diagnoses[index]
+		}
+	}
+	return nil
+}
 
 func TestMockFullProfilePassesContextAndVision(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -22,7 +40,7 @@ func TestMockFullProfilePassesContextAndVision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"context.8k", "context.32k", "vision.image_input"} {
+	for _, id := range []string{"context.16k", "context.32k", "vision.image_input"} {
 		found := false
 		for _, check := range report.Checks {
 			if check.ID == id && check.Status == "pass" {
@@ -32,6 +50,131 @@ func TestMockFullProfilePassesContextAndVision(t *testing.T) {
 		if !found {
 			t.Fatalf("missing passing check %q in %#v", id, report.Checks)
 		}
+	}
+}
+
+func TestContextDegradationRequiresRepeatedSizeDifference(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	report, err := Run(ctx, Options{Provider: "mock", Profile: "context", MockScenario: "context-degradation", Timeout: 3 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := diagnosisCode(report, "MODEL_CONTEXT_DEGRADATION"); got == nil || got.Confidence != "high" {
+		t.Fatalf("expected high confidence context diagnosis, got %#v", report.Diagnoses)
+	}
+	if report.Checks[9].Passed != 3 || report.Checks[10].Passed != 0 {
+		t.Fatalf("expected consistent 16K pass and 32K failure, got %+v %+v", report.Checks[9], report.Checks[10])
+	}
+}
+
+func TestMockRunDiagnosesHarnessParserAfterDirectPass(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	report, err := Run(ctx, Options{Provider: "mock", Harness: "opencode", MockScenario: "harness-parser", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnosisCode(report, "HARNESS_TOOL_PARSER") == nil {
+		t.Fatalf("expected differential harness diagnosis, got %+v", report.Diagnoses)
+	}
+	if report.Checks[9].Status != "pass" || report.Checks[10].Status != "fail" {
+		t.Fatalf("expected direct pass and harness failure, got %+v %+v", report.Checks[9], report.Checks[10])
+	}
+}
+
+func TestDiagnosisDistinguishesDirectModelAndHarnessFailures(t *testing.T) {
+	baseline := Check{ID: "harness.baseline", Status: "pass"}
+	parser := diagnose([]Check{baseline, {ID: "harness.opencode", Status: "fail", Error: "OpenCode could not complete the fixture"}})
+	if len(parser) != 1 || parser[0].Code != "HARNESS_TOOL_PARSER" {
+		t.Fatalf("unexpected parser diagnosis: %+v", parser)
+	}
+	timeout := diagnose([]Check{baseline, {ID: "harness.opencode", Status: "fail", Error: "OpenCode exceeded the configured harness timeout"}})
+	if len(timeout) != 1 || timeout[0].Code != "HARNESS_TIMEOUT" {
+		t.Fatalf("unexpected timeout diagnosis: %+v", timeout)
+	}
+	missing := diagnose([]Check{baseline, {ID: "harness.opencode", Status: "fail", Error: "OpenCode CLI was not found on PATH"}})
+	if len(missing) != 1 || missing[0].Code != "HARNESS_NOT_FOUND" {
+		t.Fatalf("unexpected missing harness diagnosis: %+v", missing)
+	}
+	directFailure := diagnose([]Check{{ID: "tool.basic", Status: "fail"}, {ID: "harness.baseline", Status: "fail"}, {ID: "harness.opencode", Status: "fail"}})
+	if diagnosisCode(&Report{Diagnoses: directFailure}, "MODEL_SCHEMA_FAILURE") == nil {
+		t.Fatalf("expected model schema diagnosis, got %+v", directFailure)
+	}
+}
+
+func TestOpenCodeVerificationRequiresFinalAssistantText(t *testing.T) {
+	output := []byte("{\"type\":\"tool_use\",\"part\":{\"type\":\"tool\",\"state\":{\"output\":\"MDOC_OPENCODE_CANARY_91C4\"}}}\n" +
+		"{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"The fixture tool result could not be parsed.\"}}\n")
+	if strings.Contains(openCodeFinalText(output), "MDOC_OPENCODE_CANARY_91C4") {
+		t.Fatal("tool output was mistaken for a successful assistant response")
+	}
+	output = []byte("{\"type\":\"text\",\"part\":{\"type\":\"text\",\"text\":\"MDOC_OPENCODE_CANARY_91C4\"}}\n")
+	if !strings.Contains(openCodeFinalText(output), "MDOC_OPENCODE_CANARY_91C4") {
+		t.Fatal("final assistant text did not preserve the expected marker")
+	}
+}
+
+func TestReportsShowHarnessTimeoutAndRepeatedContextResults(t *testing.T) {
+	report := &Report{HarnessTimeoutMS: 300, Checks: []Check{{Name: "Context", Status: "pass", Attempts: 3, Passed: 2}}}
+	for name, rendered := range map[string]string{"text": Text(report), "markdown": Markdown(report)} {
+		if !strings.Contains(rendered, "300 ms") || !strings.Contains(rendered, "2 of 3") {
+			t.Errorf("%s report omitted timeout or attempt evidence: %s", name, rendered)
+		}
+	}
+}
+
+func TestUnreachableProviderUsesConnectionDiagnosis(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := "http://" + listener.Addr().String() + "/v1"
+	listener.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	report, err := Run(ctx, Options{Provider: "openai", Endpoint: endpoint, Model: "test", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnosisCode(report, "PROVIDER_CONNECTION") == nil {
+		t.Fatalf("expected provider connection diagnosis, got %+v", report.Diagnoses)
+	}
+}
+
+func TestMalformedDirectToolCallUsesSchemaDiagnosis(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	report, err := Run(ctx, Options{Provider: "mock", MockScenario: "malformed-tool", Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diagnosisCode(report, "MODEL_SCHEMA_FAILURE") == nil {
+		t.Fatalf("expected model schema diagnosis, got %+v", report.Diagnoses)
+	}
+}
+
+func TestMockProviderStatusAndSlowModes(t *testing.T) {
+	for _, test := range []struct {
+		scenario string
+		status   int
+	}{{"rate-limit", http.StatusTooManyRequests}, {"server-error", http.StatusInternalServerError}} {
+		client := newMockClient(t, test.scenario)
+		_, err := client.chat(context.Background(), []message{{Role: "user", Content: "hello"}}, nil, false)
+		if err == nil || !strings.Contains(err.Error(), "HTTP "+strconv.Itoa(test.status)) {
+			t.Errorf("expected HTTP %d to be reported as an error, got %v", test.status, err)
+		}
+	}
+	client := newMockClient(t, "slow")
+	client.http.Timeout = time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := client.chat(ctx, []message{{Role: "user", Content: "hello"}}, nil, false); err == nil {
+		t.Fatal("slow mode should observe request cancellation")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("slow mode ignored cancellation for %v", elapsed)
 	}
 }
 
@@ -101,8 +244,19 @@ func TestMockProviderDoctorPasses(t *testing.T) {
 	if report.ExitCode() != ExitOK {
 		t.Fatalf("mock diagnostics were not green: %s", Text(report))
 	}
-	if len(report.Checks) != 6 {
-		t.Fatalf("got %d checks, expected six", len(report.Checks))
+	if len(report.Checks) != 9 {
+		t.Fatalf("got %d checks, expected nine", len(report.Checks))
+	}
+	for _, id := range []string{"tool.enum", "tool.file_edit", "tool.shell"} {
+		found := false
+		for _, check := range report.Checks {
+			if check.ID == id && check.Status == "pass" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing passing MVP probe %q", id)
+		}
 	}
 }
 
