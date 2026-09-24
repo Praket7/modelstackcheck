@@ -13,7 +13,7 @@ import (
 	"github.com/Praket7/modelstackcheck/internal/doctor"
 )
 
-var version = "0.1.1-alpha"
+var version = "0.1.2-alpha"
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 

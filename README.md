@@ -8,7 +8,7 @@ ModelStackCheck helps you find where a coding model setup breaks, and it points 
 
 ## Try it
 
-Download the [latest alpha](https://github.com/Praket7/modelstackcheck/releases/latest) for your computer, and run a private demo with no model account.
+Download [version 0.1.2 alpha](https://github.com/Praket7/modelstackcheck/releases/tag/v0.1.2-alpha) for your computer, and run a private demo with no model account.
 
 ```sh
 modelstackcheck doctor --provider mock

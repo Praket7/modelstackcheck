@@ -582,9 +582,9 @@ func runOpenCode(ctx context.Context, client *apiClient, model string, timeout t
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if probeCtx.Err() != nil {
-			return "", errors.New("OpenCode did not finish the read only fixture before the timeout. " + limited(Redact(strings.TrimSpace(string(output)))))
+			return "", errors.New("OpenCode did not finish the read only fixture before the timeout")
 		}
-		return "", fmt.Errorf("OpenCode fixture failed: %s", Redact(strings.TrimSpace(string(output))))
+		return "", errors.New("OpenCode could not complete the read only fixture")
 	}
 	if !strings.Contains(string(output), canary) {
 		return "", errors.New("OpenCode did not return the fixture marker")
@@ -607,11 +607,4 @@ func isolatedEnv(environment []string, replacements map[string]string) []string 
 		out = append(out, key+"="+value)
 	}
 	return out
-}
-
-func limited(value string) string {
-	if len(value) > 1200 {
-		return value[len(value)-1200:]
-	}
-	return value
 }

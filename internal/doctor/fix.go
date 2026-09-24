@@ -89,7 +89,7 @@ func FixProviderTimeout(path, provider string, timeout time.Duration, apply bool
 	if err := backupFile.Close(); err != nil {
 		return "", errors.New("could not close the configuration backup")
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".mdoc-fix-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".modelstackcheck-fix-*")
 	if err != nil {
 		return "", errors.New("could not create a temporary configuration file")
 	}
