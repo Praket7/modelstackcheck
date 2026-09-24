@@ -1,0 +1,26 @@
+name: Bug report
+description: Share a reproducible diagnostic problem
+body:
+  - type: markdown
+    attributes:
+      value: Review your report and remove private prompts, local file contents, and API keys before sharing.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened
+      description: Describe the result and what you expected.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: ModelDoctor version
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Redacted report
+      description: Paste only the relevant checks and diagnosis.
+    validations:
+      required: true

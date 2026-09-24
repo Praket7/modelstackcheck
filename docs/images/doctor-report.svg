@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="690" viewBox="0 0 1200 690" role="img" aria-labelledby="title desc">
+  <title id="title">ModelDoctor sample report</title>
+  <desc id="desc">A terminal view showing passing checks from the local deterministic mock provider.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop stop-color="#101921"/>
+      <stop offset="1" stop-color="#17252d"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#000" flood-opacity=".3"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="690" rx="28" fill="url(#bg)"/>
+  <circle cx="1050" cy="80" r="220" fill="#2fb79b" opacity=".08"/>
+  <rect x="92" y="68" width="1016" height="554" rx="18" fill="#111b21" stroke="#31434b" filter="url(#shadow)"/>
+  <path d="M110 68h980a18 18 0 0 1 18 18v43H92V86a18 18 0 0 1 18-18Z" fill="#1c2a31"/>
+  <circle cx="124" cy="99" r="6" fill="#f27c73"/>
+  <circle cx="146" cy="99" r="6" fill="#e9b66c"/>
+  <circle cx="168" cy="99" r="6" fill="#55c5a6"/>
+  <text x="600" y="104" text-anchor="middle" fill="#8b9da3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">ModelDoctor  ·  local diagnostic</text>
+  <text x="142" y="168" fill="#f0f5f2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" font-weight="700">$ mdoc doctor --provider mock</text>
+  <text x="142" y="210" fill="#dbe6e3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700" letter-spacing="1.6">MODELDOCTOR REPORT</text>
+  <text x="142" y="250" fill="#99aaa9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">Provider  mock</text>
+  <text x="142" y="276" fill="#99aaa9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">Model     modeldoctor-mock</text>
+  <text x="142" y="322" fill="#dbe6e3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="700" letter-spacing="1.6">CHECKS</text>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">
+    <g fill="#6fe0b8">
+      <text x="144" y="361">✓</text><text x="144" y="397">✓</text><text x="144" y="433">✓</text>
+      <text x="144" y="469">✓</text><text x="144" y="505">✓</text><text x="144" y="541">✓</text>
+    </g>
+    <g fill="#e0e9e5">
+      <text x="176" y="361">Provider connection</text><text x="176" y="397">Streaming</text><text x="176" y="433">Basic tool call</text>
+      <text x="176" y="469">Nested tool arguments</text><text x="176" y="505">Multiple tool calls</text><text x="176" y="541">Tool error recovery</text>
+    </g>
+    <g fill="#7f9692" font-size="13" letter-spacing="1">
+      <text x="803" y="361">PASS</text><text x="803" y="397">PASS</text><text x="803" y="433">PASS</text>
+      <text x="803" y="469">PASS</text><text x="803" y="505">PASS</text><text x="803" y="541">PASS</text>
+    </g>
+  </g>
+  <rect x="142" y="572" width="916" height="1" fill="#2a3a40"/>
+  <text x="142" y="596" fill="#6f8987" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">Local demo with repeatable responses. No prompts are uploaded.</text>
+</svg>
