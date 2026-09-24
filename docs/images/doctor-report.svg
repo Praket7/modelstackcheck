@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="690" viewBox="0 0 1200 690" role="img" aria-labelledby="title desc">
-  <title id="title">ModelDoctor sample report</title>
+  <title id="title">ModelStackCheck sample report</title>
   <desc id="desc">A terminal view showing passing checks from the local deterministic mock provider.</desc>
   <defs>
     <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
@@ -17,11 +17,11 @@
   <circle cx="124" cy="99" r="6" fill="#f27c73"/>
   <circle cx="146" cy="99" r="6" fill="#e9b66c"/>
   <circle cx="168" cy="99" r="6" fill="#55c5a6"/>
-  <text x="600" y="104" text-anchor="middle" fill="#8b9da3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">ModelDoctor  ·  local diagnostic</text>
-  <text x="142" y="168" fill="#f0f5f2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" font-weight="700">$ mdoc doctor --provider mock</text>
-  <text x="142" y="210" fill="#dbe6e3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700" letter-spacing="1.6">MODELDOCTOR REPORT</text>
+  <text x="600" y="104" text-anchor="middle" fill="#8b9da3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">ModelStackCheck  ·  local diagnostic</text>
+  <text x="142" y="168" fill="#f0f5f2" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="19" font-weight="700">$ modelstackcheck doctor --provider mock</text>
+  <text x="142" y="210" fill="#dbe6e3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16" font-weight="700" letter-spacing="1.6">MODELSTACKCHECK REPORT</text>
   <text x="142" y="250" fill="#99aaa9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">Provider  mock</text>
-  <text x="142" y="276" fill="#99aaa9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">Model     modeldoctor-mock</text>
+  <text x="142" y="276" fill="#99aaa9" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15">Model     modelstackcheck-mock</text>
   <text x="142" y="322" fill="#dbe6e3" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="15" font-weight="700" letter-spacing="1.6">CHECKS</text>
   <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="16">
     <g fill="#6fe0b8">

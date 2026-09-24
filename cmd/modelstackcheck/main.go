@@ -10,10 +10,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/Praket7/modeldoctor/internal/doctor"
+	"github.com/Praket7/modelstackcheck/internal/doctor"
 )
 
-var version = "0.1.0-alpha"
+var version = "0.1.1-alpha"
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
@@ -24,7 +24,7 @@ func run(args []string, out, errOut *os.File) int {
 	}
 	switch args[0] {
 	case "version":
-		fmt.Fprintln(out, "ModelDoctor", version)
+		fmt.Fprintln(out, "ModelStackCheck", version)
 		return 0
 	case "help", "-h", "--help":
 		usage(out)
@@ -35,6 +35,8 @@ func run(args []string, out, errOut *os.File) int {
 		return runDiagnose(args[1:], out, errOut)
 	case "mock-provider":
 		return runMock(args[1:], out, errOut)
+	case "fix":
+		return runFix(args[1:], out, errOut)
 	default:
 		fmt.Fprintf(errOut, "Unknown command %q\n\n", args[0])
 		usage(errOut)
@@ -43,19 +45,21 @@ func run(args []string, out, errOut *os.File) int {
 }
 
 func usage(out *os.File) {
-	fmt.Fprintln(out, `ModelDoctor finds where an AI coding setup breaks.
+	fmt.Fprintln(out, `ModelStackCheck finds where an AI coding setup breaks.
 
 Usage
-  mdoc doctor [options]
-  mdoc diagnose report.json
-  mdoc mock-provider serve
-  mdoc version
+  modelstackcheck doctor [options]
+  modelstackcheck diagnose report.json
+  modelstackcheck fix [options]
+  modelstackcheck mock-provider serve
+  modelstackcheck version
 
 Doctor options
   --provider auto, ollama, openai, or mock
   --model model name for the provider
   --endpoint provider address
   --harness auto or opencode
+  --profile quick, context, vision, or full
   --format text, markdown, or json
   --output save a report to a file
   --timeout maximum time for each request
@@ -74,6 +78,7 @@ func runDoctor(args []string, out, errOut *os.File) int {
 	format := fs.String("format", "text", "text, markdown, or json")
 	output := fs.String("output", "", "report output path")
 	timeout := fs.Duration("timeout", 30*time.Second, "request timeout")
+	profile := fs.String("profile", "quick", "quick, context, vision, or full")
 	if err := fs.Parse(args); err != nil {
 		return doctor.ExitConfiguration
 	}
@@ -91,7 +96,7 @@ func runDoctor(args []string, out, errOut *os.File) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	report, err := doctor.Run(ctx, doctor.Options{Provider: *providerName, Model: *model, Endpoint: *endpoint, Harness: *harness, Timeout: *timeout})
+	report, err := doctor.Run(ctx, doctor.Options{Provider: *providerName, Model: *model, Endpoint: *endpoint, Harness: *harness, Profile: *profile, Timeout: *timeout})
 	if err != nil {
 		fmt.Fprintln(errOut, doctor.Redact(err.Error()))
 		return doctor.ExitConfiguration
@@ -122,6 +127,58 @@ func runDoctor(args []string, out, errOut *os.File) int {
 	return report.ExitCode()
 }
 
+func runFix(args []string, out, errOut *os.File) int {
+	fs := flag.NewFlagSet("fix", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	reportPath := fs.String("report", "", "diagnostic report with a provider timeout finding")
+	config := fs.String("config", "opencode.json", "OpenCode JSON configuration file")
+	provider := fs.String("provider", "", "OpenCode provider name")
+	timeout := fs.Duration("timeout", 10*time.Minute, "new provider request timeout")
+	apply := fs.Bool("apply", false, "apply the fix and create a backup")
+	if err := fs.Parse(args); err != nil {
+		return doctor.ExitConfiguration
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintln(errOut, "fix does not accept positional arguments")
+		return doctor.ExitConfiguration
+	}
+	if *reportPath == "" {
+		fmt.Fprintln(errOut, "fix needs --report from a doctor run")
+		return doctor.ExitConfiguration
+	}
+	reportData, err := os.ReadFile(*reportPath)
+	if err != nil {
+		fmt.Fprintln(errOut, "Could not read the diagnostic report")
+		return doctor.ExitConfiguration
+	}
+	var report doctor.Report
+	if err := json.Unmarshal(reportData, &report); err != nil {
+		fmt.Fprintln(errOut, "That file is not a ModelStackCheck report")
+		return doctor.ExitConfiguration
+	}
+	if report.Harness != "OpenCode" {
+		fmt.Fprintln(errOut, "The report did not identify OpenCode")
+		return doctor.ExitConfiguration
+	}
+	fixable := false
+	for _, diagnosis := range report.Diagnoses {
+		if diagnosis.Code == "RUNTIME_TIMEOUT" {
+			fixable = true
+		}
+	}
+	if !fixable {
+		fmt.Fprintln(errOut, "The report has no supported provider timeout finding")
+		return doctor.ExitConfiguration
+	}
+	result, err := doctor.FixProviderTimeout(*config, *provider, *timeout, *apply)
+	if err != nil {
+		fmt.Fprintln(errOut, doctor.Redact(err.Error()))
+		return doctor.ExitConfiguration
+	}
+	fmt.Fprintln(out, doctor.Redact(result))
+	return doctor.ExitOK
+}
+
 func saveReport(path, body string) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
@@ -137,7 +194,7 @@ func saveReport(path, body string) error {
 
 func runDiagnose(args []string, out, errOut *os.File) int {
 	if len(args) != 1 {
-		fmt.Fprintln(errOut, "Usage: mdoc diagnose report.json")
+		fmt.Fprintln(errOut, "Usage: modelstackcheck diagnose report.json")
 		return doctor.ExitConfiguration
 	}
 	data, err := os.ReadFile(args[0])
@@ -147,7 +204,7 @@ func runDiagnose(args []string, out, errOut *os.File) int {
 	}
 	var report doctor.Report
 	if err := json.Unmarshal(data, &report); err != nil {
-		fmt.Fprintln(errOut, "That file is not a ModelDoctor report")
+		fmt.Fprintln(errOut, "That file is not a ModelStackCheck report")
 		return doctor.ExitConfiguration
 	}
 	fmt.Fprint(out, doctor.Text(&report))
@@ -156,7 +213,7 @@ func runDiagnose(args []string, out, errOut *os.File) int {
 
 func runMock(args []string, out, errOut *os.File) int {
 	if len(args) != 1 || args[0] != "serve" {
-		fmt.Fprintln(errOut, "Usage: mdoc mock-provider serve")
+		fmt.Fprintln(errOut, "Usage: modelstackcheck mock-provider serve")
 		return doctor.ExitConfiguration
 	}
 	if err := doctor.ServeMock("127.0.0.1:11435"); err != nil && !errors.Is(err, context.Canceled) {

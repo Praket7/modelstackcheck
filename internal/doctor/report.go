@@ -31,7 +31,7 @@ func Redact(value string) string {
 
 func Text(report *Report) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "MODELDOCTOR REPORT\n\nProvider  %s\n", Redact(report.Provider))
+	fmt.Fprintf(&b, "MODELSTACKCHECK REPORT\n\nProvider  %s\n", Redact(report.Provider))
 	if report.Model != "" {
 		fmt.Fprintf(&b, "Model     %s\n", Redact(report.Model))
 	}
@@ -75,7 +75,7 @@ func Text(report *Report) string {
 
 func Markdown(report *Report) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "# ModelDoctor report\n\nProvider %s  \n", Redact(report.Provider))
+	fmt.Fprintf(&b, "# ModelStackCheck report\n\nProvider %s  \n", Redact(report.Provider))
 	if report.Model != "" {
 		fmt.Fprintf(&b, "Model %s  \n", Redact(report.Model))
 	}

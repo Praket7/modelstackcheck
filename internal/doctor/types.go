@@ -20,6 +20,7 @@ type Options struct {
 	Model    string
 	Endpoint string
 	Harness  string
+	Profile  string
 	Timeout  time.Duration
 }
 
@@ -85,7 +86,7 @@ type chatRequest struct {
 
 type message struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
+	Content    any        `json:"content,omitempty"`
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 }

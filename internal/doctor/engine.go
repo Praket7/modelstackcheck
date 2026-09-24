@@ -1,10 +1,15 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +30,12 @@ func Run(ctx context.Context, options Options) (*Report, error) {
 	}
 	if options.Harness != "auto" && options.Harness != "opencode" {
 		return nil, errors.New("harness must be auto or opencode")
+	}
+	if options.Profile == "" {
+		options.Profile = "quick"
+	}
+	if options.Profile != "quick" && options.Profile != "context" && options.Profile != "vision" && options.Profile != "full" {
+		return nil, errors.New("profile must be quick, context, vision, or full")
 	}
 	if options.Provider != "auto" && options.Provider != "ollama" && options.Provider != "openai" && options.Provider != "mock" {
 		return nil, errors.New("provider must be auto, ollama, openai, or mock")
@@ -167,20 +178,70 @@ func Run(ctx context.Context, options Options) (*Report, error) {
 		if len(second.Choices[0].Message.ToolCalls) > 0 && second.Choices[0].Message.ToolCalls[0].Function.Name == "read_file" {
 			return "", errors.New("model repeated the same failed tool call")
 		}
-		if strings.TrimSpace(second.Choices[0].Message.Content) == "" && len(second.Choices[0].Message.ToolCalls) == 0 {
+		if strings.TrimSpace(textContent(second.Choices[0].Message.Content)) == "" && len(second.Choices[0].Message.ToolCalls) == 0 {
 			return "", errors.New("model returned no response after the tool error")
 		}
 		return "Responded after receiving a simulated missing file error.", nil
 	})
+	if options.Profile == "context" || options.Profile == "full" {
+		for _, size := range []int{8 << 10, 32 << 10} {
+			size := size
+			runProbe(fmt.Sprintf("context.%dk", size/1024), fmt.Sprintf("Context retrieval at about %dK tokens", size/1024), func(c context.Context) (string, error) {
+				const canary = "MDOC_CONTEXT_CANARY_7F3A"
+				filler := strings.Repeat("oak river cloud meadow ", size*4/22)
+				prompt := fmt.Sprintf("Read this note and return only the code after CODE.\n%s\nCODE %s", filler, canary)
+				resp, err := client.chat(c, []message{{Role: "user", Content: prompt}}, nil, false)
+				if err != nil {
+					return "", err
+				}
+				if !strings.Contains(textContent(resp.Choices[0].Message.Content), canary) {
+					return "", errors.New("model did not retrieve the code placed at the end of the context")
+				}
+				return fmt.Sprintf("Retrieved the final marker from about %d tokens of generated context, estimated at four characters per token.", size/1024), nil
+			})
+		}
+	}
+	if options.Profile == "vision" || options.Profile == "full" {
+		runProbe("vision.image_input", "Image understanding", func(c context.Context) (string, error) {
+			content := []map[string]any{{"type": "text", "text": "What color is the central pixel in this image? Answer with one color."}, {"type": "image_url", "image_url": map[string]string{"url": "data:image/png;base64," + syntheticRedPNG()}}}
+			resp, err := client.chat(c, []message{{Role: "user", Content: content}}, nil, false)
+			if err != nil {
+				return "", err
+			}
+			answer := strings.ToLower(textContent(resp.Choices[0].Message.Content))
+			if !strings.Contains(answer, "red") {
+				return "", errors.New("model did not identify the red image marker")
+			}
+			return "Identified the red pixel in a synthetic one pixel image.", nil
+		})
+	}
+	if options.Harness == "opencode" {
+		startedHarness := time.Now()
+		evidence, err := runOpenCode(ctx, client, model, options.Timeout)
+		check := Check{ID: "harness.opencode", Name: "OpenCode execution", Status: "pass", DurationMS: time.Since(startedHarness).Milliseconds(), Evidence: evidence}
+		if err != nil {
+			check.Status = "fail"
+			check.Error = Redact(err.Error())
+			check.Evidence = "The controlled fixture was not completed through OpenCode."
+		}
+		report.Checks = append(report.Checks, check)
+	}
 	report.Diagnoses = diagnose(report.Checks)
 	if report.Harness != "" {
-		report.Notes = append(report.Notes, "OpenCode was found on this computer. This release records its presence but does not send prompts through it.")
+		report.Notes = append(report.Notes, "The OpenCode check uses an isolated temporary project and configuration, and grants read access only to its fixture.")
 	}
 	if report.Harness == "" && options.Harness == "opencode" {
 		report.Notes = append(report.Notes, "OpenCode was requested but was not detected.")
 	}
 	if len(report.Diagnoses) == 0 {
-		report.Diagnoses = append(report.Diagnoses, Diagnosis{Code: "NO_FAILURE_OBSERVED", Confidence: "medium", Summary: "The tested provider checks passed in this run.", Evidence: []string{"Provider connection, streaming, basic tools, nested arguments, multiple tools, and recovery passed."}, Recommendation: "Try the same setup in your coding harness if the problem only occurs there."})
+		evidence := "Provider connection, streaming, tool calls, and recovery passed."
+		recommendation := "No issue appeared in the selected checks, so try the setup with the task that first failed."
+		for _, check := range report.Checks {
+			if check.ID == "harness.opencode" && check.Status == "pass" {
+				evidence += " OpenCode also completed the read only fixture."
+			}
+		}
+		report.Diagnoses = append(report.Diagnoses, Diagnosis{Code: "NO_FAILURE_OBSERVED", Confidence: "medium", Summary: "The tested checks passed in this run.", Evidence: []string{evidence}, Recommendation: recommendation})
 	}
 	return report, nil
 }
@@ -191,7 +252,7 @@ func selectProvider(options Options) (*apiClient, string, string, func(), error)
 	if name == "mock" {
 		server := httptest.NewServer(mockHandler())
 		if model == "" {
-			model = "modeldoctor-mock"
+			model = "modelstackcheck-mock"
 		}
 		return &apiClient{base: server.URL + "/v1", model: model}, "mock", model, server.Close, nil
 	}
@@ -273,6 +334,15 @@ func diagnose(checks []Check) []Diagnosis {
 	if failed["tool.failure_recovery"] {
 		out = append(out, Diagnosis{Code: "MODEL_TOOL_SELECTION", Confidence: "medium", Summary: "The model did not recover cleanly after a tool error.", Evidence: []string{"The simulated missing file error was not handled as expected."}, Recommendation: "Use clearer tool error messages or a model with stronger tool recovery behavior."})
 	}
+	if failed["harness.opencode"] {
+		out = append(out, Diagnosis{Code: "HARNESS_EXECUTION", Confidence: "high", Summary: "The controlled tool call did not complete through OpenCode.", Evidence: []string{"The check used a temporary project and a provider fixture."}, Recommendation: "Compare the OpenCode model and provider settings with the direct provider results, then repeat the harness check."})
+	}
+	if failed["context.8k"] || failed["context.32k"] {
+		out = append(out, Diagnosis{Code: "CONTEXT_RETRIEVAL", Confidence: "medium", Summary: "The model did not retrieve a marker placed at the end of a long prompt.", Evidence: []string{"The context probe failed at one or more requested sizes."}, Recommendation: "Lower the prompt size or raise the provider context limit, then repeat the same retrieval check."})
+	}
+	if failed["vision.image_input"] {
+		out = append(out, Diagnosis{Code: "PROVIDER_VISION", Confidence: "medium", Summary: "The model did not identify the image sent with the request.", Evidence: []string{"The synthetic image recognition probe failed."}, Recommendation: "Choose a vision enabled model and confirm the provider supports image input."})
+	}
 	return out
 }
 
@@ -319,7 +389,7 @@ func ServeMock(address string) error {
 func mockHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "modeldoctor-mock", "object": "model"}}})
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "modelstackcheck-mock", "object": "model"}}})
 	})
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		var request chatRequest
@@ -330,7 +400,7 @@ func mockHandler() http.Handler {
 		if request.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"READY\"}}]}\n\ndata: [DONE]\n\n")
+			writeMockStream(w, mockAnswer(request))
 			return
 		}
 		answer := mockAnswer(request)
@@ -340,15 +410,57 @@ func mockHandler() http.Handler {
 	return mux
 }
 
+func writeMockStream(w http.ResponseWriter, answer message) {
+	var delta map[string]any
+	finishReason := "stop"
+	if len(answer.ToolCalls) > 0 {
+		finishReason = "tool_calls"
+		call := answer.ToolCalls[0]
+		delta = map[string]any{"tool_calls": []any{map[string]any{"index": 0, "id": call.ID, "type": "function", "function": map[string]string{"name": call.Function.Name, "arguments": call.Function.Arguments}}}}
+	} else {
+		content := textContent(answer.Content)
+		if content == "" {
+			content = "READY"
+		}
+		delta = map[string]any{"content": content}
+	}
+	data, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finishReason}}})
+	fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
+}
+
 func mockAnswer(req chatRequest) message {
 	text := ""
 	for _, msg := range req.Messages {
-		text += " " + strings.ToLower(msg.Content)
+		text += " " + strings.ToLower(textContent(msg.Content))
 	}
 	for _, msg := range req.Messages {
-		if msg.Role == "tool" && strings.Contains(msg.Content, "MDOC_CHECK_") {
-			return message{Role: "assistant", Content: "I read the fixture. Its exact code is " + strings.TrimSpace(msg.Content)}
+		if msg.Role == "tool" && strings.Contains(textContent(msg.Content), "MDOC_") {
+			return message{Role: "assistant", Content: "I read the fixture. Its exact code is " + strings.TrimSpace(textContent(msg.Content))}
 		}
+	}
+	if strings.Contains(text, "mdoc_context_canary_7f3a") {
+		return message{Role: "assistant", Content: "MDOC_CONTEXT_CANARY_7F3A"}
+	}
+	encoded, _ := json.Marshal(req.Messages)
+	if strings.Contains(string(encoded), "data:image/png") {
+		return message{Role: "assistant", Content: "red"}
+	}
+	if strings.Contains(text, "mdoc_opencode_canary") {
+		for _, candidate := range req.Tools {
+			if candidate.Function.Name != "read" && candidate.Function.Name != "read_file" {
+				continue
+			}
+			args := map[string]any{}
+			properties, _ := candidate.Function.Parameters["properties"].(map[string]any)
+			for key := range properties {
+				if key == "filePath" || key == "path" {
+					args[key] = "fixture.txt"
+				}
+			}
+			data, _ := json.Marshal(args)
+			return message{Role: "assistant", ToolCalls: []toolCall{{ID: "opencode_fixture_read", Type: "function", Function: calledFunction{Name: candidate.Function.Name, Arguments: string(data)}}}}
+		}
+		return message{Role: "assistant", Content: "I cannot find a read tool."}
 	}
 	if strings.Contains(text, "does not exist") {
 		return message{Role: "assistant", Content: "The file is missing. I can list available files."}
@@ -391,4 +503,115 @@ func mockAnswer(req chatRequest) message {
 		}
 	}
 	return message{Role: "assistant", ToolCalls: calls, Content: "All requested checks completed."}
+}
+
+func textContent(value any) string {
+	switch content := value.(type) {
+	case string:
+		return content
+	case []any:
+		var out strings.Builder
+		for _, part := range content {
+			if item, ok := part.(map[string]any); ok {
+				if s, ok := item["text"].(string); ok {
+					out.WriteString(s)
+				}
+			}
+		}
+		return out.String()
+	default:
+		return ""
+	}
+}
+
+func syntheticRedPNG() string {
+	img := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	for y := 0; y < 8; y++ {
+		for x := 0; x < 8; x++ {
+			img.Set(x, y, color.RGBA{R: 255, A: 255})
+		}
+	}
+	var data bytes.Buffer
+	_ = png.Encode(&data, img)
+	return base64.StdEncoding.EncodeToString(data.Bytes())
+}
+
+func runOpenCode(ctx context.Context, client *apiClient, model string, timeout time.Duration) (string, error) {
+	path, err := exec.LookPath("opencode")
+	if err != nil {
+		return "", errors.New("OpenCode CLI was not found on PATH")
+	}
+	root, err := os.MkdirTemp("", "mdoc-opencode-")
+	if err != nil {
+		return "", errors.New("could not create the isolated OpenCode fixture")
+	}
+	defer os.RemoveAll(root)
+	project := filepath.Join(root, "project")
+	if err := os.Mkdir(project, 0700); err != nil {
+		return "", errors.New("could not create the isolated OpenCode project")
+	}
+	const canary = "MDOC_OPENCODE_CANARY_91C4"
+	if err := os.WriteFile(filepath.Join(project, "fixture.txt"), []byte(canary+"\n"), 0600); err != nil {
+		return "", errors.New("could not create the isolated OpenCode fixture")
+	}
+	providerModel := model
+	if providerModel == "" {
+		providerModel = "probe"
+		client.model = providerModel
+	}
+	configuration := map[string]any{
+		"$schema":    "https://opencode.ai/config.json",
+		"model":      "modelstackcheck/" + providerModel,
+		"permission": map[string]string{"edit": "deny", "bash": "deny", "external_directory": "deny"},
+		"provider": map[string]any{"modelstackcheck": map[string]any{
+			"npm": "@ai-sdk/openai-compatible", "name": "ModelStackCheck isolated provider",
+			"options": map[string]any{"baseURL": client.base, "apiKey": client.key},
+			"models":  map[string]any{providerModel: map[string]any{"name": "Isolated probe model", "tool_call": true, "limit": map[string]int{"context": 65536, "output": 4096}}},
+		}},
+	}
+	data, _ := json.Marshal(configuration)
+	configPath := filepath.Join(root, "opencode.json")
+	if err := os.WriteFile(configPath, data, 0600); err != nil {
+		return "", errors.New("could not create the isolated OpenCode configuration")
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(probeCtx, path, "run", "--pure", "--agent", "plan", "--model", "modelstackcheck/"+providerModel, "--format", "json", "--dir", project, "Read fixture.txt and return the exact marker that it contains. Include MDOC_OPENCODE_CANARY in your tool call plan.")
+	cmd.Dir = project
+	cmd.Env = isolatedEnv(os.Environ(), map[string]string{"OPENCODE_CONFIG": configPath, "OPENCODE_CONFIG_DIR": root, "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1", "HOME": root, "USERPROFILE": root, "XDG_CONFIG_HOME": root, "XDG_DATA_HOME": root, "APPDATA": root})
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		if probeCtx.Err() != nil {
+			return "", errors.New("OpenCode did not finish the read only fixture before the timeout. " + limited(Redact(strings.TrimSpace(string(output)))))
+		}
+		return "", fmt.Errorf("OpenCode fixture failed: %s", Redact(strings.TrimSpace(string(output))))
+	}
+	if !strings.Contains(string(output), canary) {
+		return "", errors.New("OpenCode did not return the fixture marker")
+	}
+	return "OpenCode read the temporary fixture through the selected provider and returned its marker.", nil
+}
+
+func isolatedEnv(environment []string, replacements map[string]string) []string {
+	out := make([]string, 0, len(environment)+len(replacements))
+	for _, item := range environment {
+		key, _, ok := strings.Cut(item, "=")
+		if !ok {
+			continue
+		}
+		if _, replace := replacements[key]; !replace {
+			out = append(out, item)
+		}
+	}
+	for key, value := range replacements {
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func limited(value string) string {
+	if len(value) > 1200 {
+		return value[len(value)-1200:]
+	}
+	return value
 }

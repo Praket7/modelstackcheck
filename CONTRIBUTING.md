@@ -13,7 +13,7 @@ Use the Go standard library where it fits, and keep provider behavior covered by
 ```sh
 go test ./...
 go vet ./...
-go build ./cmd/mdoc
+go build ./cmd/modelstackcheck
 ```
 
 ## Pull requests

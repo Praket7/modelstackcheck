@@ -1,3 +1,3 @@
-module github.com/Praket7/modeldoctor
+module github.com/Praket7/modelstackcheck
 
 go 1.27

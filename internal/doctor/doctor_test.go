@@ -1,13 +1,92 @@
 package doctor
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestMockFullProfilePassesContextAndVision(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	report, err := Run(ctx, Options{Provider: "mock", Profile: "full", Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"context.8k", "context.32k", "vision.image_input"} {
+		found := false
+		for _, check := range report.Checks {
+			if check.ID == id && check.Status == "pass" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("missing passing check %q in %#v", id, report.Checks)
+		}
+	}
+}
+
+func TestSyntheticVisionImageIsRed(t *testing.T) {
+	data, err := base64.StdEncoding.DecodeString(syntheticRedPNG())
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, g, b, _ := img.At(4, 4).RGBA()
+	if r < 0xffff || g != 0 || b != 0 {
+		t.Fatalf("unexpected pixel rgb %x %x %x", r, g, b)
+	}
+}
+
+func TestFixProviderTimeoutPreviewApplyAndBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opencode.json")
+	original := []byte(`{"model":"x/y"}`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := FixProviderTimeout(path, "x", 10*time.Minute, false)
+	if err != nil || !strings.Contains(preview, "Preview only") {
+		t.Fatalf("preview %q, %v", preview, err)
+	}
+	unchanged, _ := os.ReadFile(path)
+	if string(unchanged) != string(original) {
+		t.Fatal("preview changed the config")
+	}
+	if _, err := FixProviderTimeout(path, "x", 10*time.Minute, true); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(path + ".bak")
+	if err != nil || string(backup) != string(original) {
+		t.Fatalf("backup did not preserve original config: %s %v", backup, err)
+	}
+	updated, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(updated, &config); err != nil {
+		t.Fatal(err)
+	}
+	provider := config["provider"].(map[string]any)["x"].(map[string]any)
+	if provider["options"].(map[string]any)["timeout"].(float64) != float64((10 * time.Minute).Milliseconds()) {
+		t.Fatal("provider timeout was not updated")
+	}
+	if _, err := FixProviderTimeout(path, "x", time.Hour, true); err == nil {
+		t.Fatal("overwrote an existing backup")
+	}
+}
 
 func TestMockProviderDoctorPasses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
@@ -16,7 +95,7 @@ func TestMockProviderDoctorPasses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Provider != "mock" || report.Model != "modeldoctor-mock" {
+	if report.Provider != "mock" || report.Model != "modelstackcheck-mock" {
 		t.Fatalf("unexpected provider metadata: %+v", report)
 	}
 	if report.ExitCode() != ExitOK {
