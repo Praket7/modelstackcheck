@@ -152,6 +152,9 @@ func makeTools(names ...string) []toolSpec {
 		"search":          {Name: "search", Description: "Search text in project files", Parameters: objectSchema(map[string]any{"query": map[string]any{"type": "string"}}, "query")},
 		"inspect_profile": {Name: "inspect_profile", Description: "Inspect a profile and its settings", Parameters: objectSchema(map[string]any{"profile": objectSchema(map[string]any{"name": map[string]any{"type": "string"}, "settings": objectSchema(map[string]any{"theme": map[string]any{"type": "string"}}, "theme")}, "name", "settings")}, "profile")},
 		"list_files":      {Name: "list_files", Description: "List available project files", Parameters: objectSchema(map[string]any{"path": map[string]any{"type": "string"}}, "path")},
+		"set_mode":        {Name: "set_mode", Description: "Choose a supported operation mode", Parameters: objectSchema(map[string]any{"mode": map[string]any{"type": "string", "enum": []string{"read", "write", "append"}}}, "mode")},
+		"edit_file":       {Name: "edit_file", Description: "Replace exact text in a fixture file", Parameters: objectSchema(map[string]any{"path": map[string]any{"type": "string"}, "old": map[string]any{"type": "string"}, "new": map[string]any{"type": "string"}}, "path", "old", "new")},
+		"run_command":     {Name: "run_command", Description: "List fixture files using the one permitted command", Parameters: objectSchema(map[string]any{"command": map[string]any{"type": "string", "enum": []string{"ls"}}}, "command")},
 	}
 	out := make([]toolSpec, 0, len(names))
 	for _, name := range names {

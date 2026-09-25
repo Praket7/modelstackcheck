@@ -16,12 +16,14 @@ const (
 )
 
 type Options struct {
-	Provider string
-	Model    string
-	Endpoint string
-	Harness  string
-	Profile  string
-	Timeout  time.Duration
+	Provider       string
+	Model          string
+	Endpoint       string
+	Harness        string
+	Profile        string
+	MockScenario   string
+	Timeout        time.Duration
+	HarnessTimeout time.Duration
 }
 
 type Check struct {
@@ -31,6 +33,8 @@ type Check struct {
 	DurationMS int64  `json:"latency_ms"`
 	Evidence   string `json:"evidence,omitempty"`
 	Error      string `json:"error,omitempty"`
+	Attempts   int    `json:"attempts,omitempty"`
+	Passed     int    `json:"passed,omitempty"`
 }
 
 type Diagnosis struct {
@@ -42,17 +46,18 @@ type Diagnosis struct {
 }
 
 type Report struct {
-	SchemaVersion string      `json:"schema_version"`
-	GeneratedAt   time.Time   `json:"generated_at"`
-	Provider      string      `json:"provider"`
-	Endpoint      string      `json:"endpoint,omitempty"`
-	Model         string      `json:"model,omitempty"`
-	Harness       string      `json:"harness,omitempty"`
-	System        string      `json:"system"`
-	Architecture  string      `json:"architecture"`
-	Checks        []Check     `json:"results"`
-	Diagnoses     []Diagnosis `json:"diagnoses"`
-	Notes         []string    `json:"notes,omitempty"`
+	SchemaVersion    string      `json:"schema_version"`
+	GeneratedAt      time.Time   `json:"generated_at"`
+	Provider         string      `json:"provider"`
+	Endpoint         string      `json:"endpoint,omitempty"`
+	Model            string      `json:"model,omitempty"`
+	Harness          string      `json:"harness,omitempty"`
+	HarnessTimeoutMS int64       `json:"harness_timeout_ms,omitempty"`
+	System           string      `json:"system"`
+	Architecture     string      `json:"architecture"`
+	Checks           []Check     `json:"results"`
+	Diagnoses        []Diagnosis `json:"diagnoses"`
+	Notes            []string    `json:"notes,omitempty"`
 }
 
 func (r *Report) ExitCode() int {

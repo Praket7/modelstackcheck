@@ -38,6 +38,9 @@ func Text(report *Report) string {
 	if report.Harness != "" {
 		fmt.Fprintf(&b, "Harness   %s\n", Redact(report.Harness))
 	}
+	if report.HarnessTimeoutMS > 0 {
+		fmt.Fprintf(&b, "Harness timeout %d ms\n", report.HarnessTimeoutMS)
+	}
 	fmt.Fprintf(&b, "System    %s %s\n\nCHECKS\n", report.System, report.Architecture)
 	for _, check := range report.Checks {
 		mark := "✓"
@@ -50,6 +53,9 @@ func Text(report *Report) string {
 		fmt.Fprintf(&b, "%s %-25s %s", mark, check.Name, strings.ToUpper(check.Status))
 		if check.DurationMS > 0 {
 			fmt.Fprintf(&b, " in %d ms", check.DurationMS)
+		}
+		if check.Attempts > 0 {
+			fmt.Fprintf(&b, " (%d of %d attempts passed)", check.Passed, check.Attempts)
 		}
 		b.WriteByte('\n')
 		if check.Error != "" {
@@ -82,6 +88,9 @@ func Markdown(report *Report) string {
 	if report.Harness != "" {
 		fmt.Fprintf(&b, "Harness %s  \n", Redact(report.Harness))
 	}
+	if report.HarnessTimeoutMS > 0 {
+		fmt.Fprintf(&b, "Harness timeout %d ms  \n", report.HarnessTimeoutMS)
+	}
 	fmt.Fprintf(&b, "System %s %s\n\n## Checks\n\n", report.System, report.Architecture)
 	for _, check := range report.Checks {
 		fmt.Fprintf(&b, "### %s\n\nStatus %s\n\n", check.Name, strings.ToUpper(check.Status))
@@ -93,6 +102,9 @@ func Markdown(report *Report) string {
 		}
 		if check.DurationMS > 0 {
 			fmt.Fprintf(&b, "Observed duration %d ms\n\n", check.DurationMS)
+		}
+		if check.Attempts > 0 {
+			fmt.Fprintf(&b, "Passed attempts %d of %d\n\n", check.Passed, check.Attempts)
 		}
 	}
 	if len(report.Diagnoses) > 0 {

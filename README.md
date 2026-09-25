@@ -18,16 +18,25 @@ The mock provider is local and repeatable, so it lets you see the report before 
 
 ## What it checks
 
-The quick check tests the provider connection and streaming, and then checks basic and nested tool calls. It also tests multiple calls and recovery after a tool error, so you can see where common failures begin.
+The quick check tests the provider connection and streaming, and then checks basic and nested tool calls. It also tests enum choices, multiple calls, recovery after a tool error, a file edit in a temporary project, and a restricted file listing.
 
-Add `--harness opencode` to run a read only fixture through the installed OpenCode command. ModelStackCheck creates a temporary project, reads one fixture file, and removes the project afterward.
+Add `--harness opencode` to run the same fixture task through the provider and the installed OpenCode command. ModelStackCheck compares the results, creates a temporary project, reads one fixture file, and removes the project afterward. Use `--timeout` for provider requests and `--harness-timeout` for the OpenCode task.
 
-Add `--profile context` to test retrieval at about 8K and 32K tokens. These sizes are estimates based on four characters per token, and the large request may use more tokens with a hosted provider.
+Add `--profile context` to test retrieval at about 16K and 32K tokens. It repeats each check three times, and these sizes are estimates based on four characters per token. The large request may use more tokens with a hosted provider.
 
 Add `--profile vision` to send a generated red image and check whether the model identifies it. Add `--profile full` to run both context and image checks.
 
 ```sh
 modelstackcheck doctor --harness opencode --profile full
+```
+
+Use the built in mock scenarios to see how ModelStackCheck reports a broken tool call, an OpenCode parser failure, a timeout, or a context limit without relying on a live model.
+
+```sh
+modelstackcheck doctor --provider mock --mock-scenario malformed-tool
+modelstackcheck doctor --provider mock --harness opencode --mock-scenario harness-parser
+modelstackcheck doctor --provider mock --harness opencode --mock-scenario harness-timeout --harness-timeout 300ms
+modelstackcheck doctor --provider mock --profile context --mock-scenario context-degradation
 ```
 
 ModelStackCheck sends prompts to the provider you select, but it does not save them. Review reports before sharing, and remember that a successful probe covers only the tested request.

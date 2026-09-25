@@ -60,9 +60,11 @@ Doctor options
   --endpoint provider address
   --harness auto or opencode
   --profile quick, context, vision, or full
+  --mock-scenario normal, tool-failure, malformed-tool, slow, rate-limit, server-error, harness-parser, harness-timeout, or context-degradation
   --format text, markdown, or json
   --output save a report to a file
   --timeout maximum time for each request
+  --harness-timeout maximum time allowed for the OpenCode fixture
 
 OpenAI compatible providers read OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL.
 Reports stay on this computer unless you save or share them.`)
@@ -78,7 +80,9 @@ func runDoctor(args []string, out, errOut *os.File) int {
 	format := fs.String("format", "text", "text, markdown, or json")
 	output := fs.String("output", "", "report output path")
 	timeout := fs.Duration("timeout", 30*time.Second, "request timeout")
+	harnessTimeout := fs.Duration("harness-timeout", 5*time.Minute, "OpenCode fixture timeout")
 	profile := fs.String("profile", "quick", "quick, context, vision, or full")
+	mockScenario := fs.String("mock-scenario", "normal", "deterministic mock provider behavior")
 	if err := fs.Parse(args); err != nil {
 		return doctor.ExitConfiguration
 	}
@@ -90,13 +94,16 @@ func runDoctor(args []string, out, errOut *os.File) int {
 		fmt.Fprintln(errOut, "timeout must be greater than zero")
 		return doctor.ExitConfiguration
 	}
+	if *harnessTimeout <= 0 {
+		fmt.Fprintln(errOut, "harness-timeout must be greater than zero")
+		return doctor.ExitConfiguration
+	}
 	if *format != "text" && *format != "markdown" && *format != "json" {
 		fmt.Fprintln(errOut, "format must be text, markdown, or json")
 		return doctor.ExitConfiguration
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	report, err := doctor.Run(ctx, doctor.Options{Provider: *providerName, Model: *model, Endpoint: *endpoint, Harness: *harness, Profile: *profile, Timeout: *timeout})
+	ctx := context.Background()
+	report, err := doctor.Run(ctx, doctor.Options{Provider: *providerName, Model: *model, Endpoint: *endpoint, Harness: *harness, Profile: *profile, MockScenario: *mockScenario, Timeout: *timeout, HarnessTimeout: *harnessTimeout})
 	if err != nil {
 		fmt.Fprintln(errOut, doctor.Redact(err.Error()))
 		return doctor.ExitConfiguration

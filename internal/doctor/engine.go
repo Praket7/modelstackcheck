@@ -40,8 +40,22 @@ func Run(ctx context.Context, options Options) (*Report, error) {
 	if options.Provider != "auto" && options.Provider != "ollama" && options.Provider != "openai" && options.Provider != "mock" {
 		return nil, errors.New("provider must be auto, ollama, openai, or mock")
 	}
+	switch options.MockScenario {
+	case "", "normal", "tool-failure", "malformed-tool", "slow", "rate-limit", "server-error", "harness-parser", "harness-timeout", "context-degradation":
+	default:
+		return nil, errors.New("unsupported mock scenario")
+	}
 	if options.Timeout == 0 {
 		options.Timeout = 30 * time.Second
+	}
+	if options.Timeout < 0 {
+		return nil, errors.New("provider timeout must be greater than zero")
+	}
+	if options.HarnessTimeout == 0 {
+		options.HarnessTimeout = 5 * time.Minute
+	}
+	if options.HarnessTimeout < time.Millisecond {
+		return nil, errors.New("harness timeout must be at least one millisecond")
 	}
 	client, provider, model, cleanup, err := selectProvider(options)
 	if err != nil {
@@ -161,6 +175,28 @@ func Run(ctx context.Context, options Options) (*Report, error) {
 		}
 		return "Returned valid calls for read_file and search.", nil
 	})
+	runProbe("tool.enum", "Enum selection", func(c context.Context) (string, error) {
+		resp, err := client.chat(c, []message{{Role: "user", Content: "Choose a mode for inspecting this project. Use set_mode with mode read."}}, makeTools("set_mode"), false)
+		if err != nil {
+			return "", err
+		}
+		calls := resp.Choices[0].Message.ToolCalls
+		if len(calls) != 1 || calls[0].Function.Name != "set_mode" || !callIsValid(calls[0]) {
+			return "", errors.New("model did not select a valid enum tool call")
+		}
+		var args map[string]any
+		_ = json.Unmarshal([]byte(calls[0].Function.Arguments), &args)
+		if args["mode"] != "read" {
+			return "", errors.New("model selected a value outside the requested enum option")
+		}
+		return "Selected the supported read value from the mode enum.", nil
+	})
+	runProbe("tool.file_edit", "Safe file edit", func(c context.Context) (string, error) {
+		return editFixtureWithModel(c, client)
+	})
+	runProbe("tool.shell", "Restricted shell task", func(c context.Context) (string, error) {
+		return listFixtureWithModel(c, client)
+	})
 	runProbe("tool.failure_recovery", "Tool error recovery", func(c context.Context) (string, error) {
 		first, err := client.chat(c, []message{{Role: "user", Content: "Try reading missing.txt with read_file."}}, makeTools("read_file", "list_files"), false)
 		if err != nil {
@@ -184,21 +220,37 @@ func Run(ctx context.Context, options Options) (*Report, error) {
 		return "Responded after receiving a simulated missing file error.", nil
 	})
 	if options.Profile == "context" || options.Profile == "full" {
-		for _, size := range []int{8 << 10, 32 << 10} {
+		for _, size := range []int{16 << 10, 32 << 10} {
 			size := size
-			runProbe(fmt.Sprintf("context.%dk", size/1024), fmt.Sprintf("Context retrieval at about %dK tokens", size/1024), func(c context.Context) (string, error) {
+			startedContext := time.Now()
+			passed, failures := 0, 0
+			var lastErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				probeCtx, cancel := context.WithTimeout(ctx, options.Timeout)
 				const canary = "MDOC_CONTEXT_CANARY_7F3A"
-				filler := strings.Repeat("oak river cloud meadow ", size*4/22)
+				filler := strings.Repeat("oak river cloud meadow ", size*4/len("oak river cloud meadow "))
 				prompt := fmt.Sprintf("Read this note and return only the code after CODE.\n%s\nCODE %s", filler, canary)
-				resp, err := client.chat(c, []message{{Role: "user", Content: prompt}}, nil, false)
+				resp, err := client.chat(probeCtx, []message{{Role: "user", Content: prompt}}, nil, false)
+				cancel()
+				if err == nil && !strings.Contains(textContent(resp.Choices[0].Message.Content), canary) {
+					err = errors.New("model did not retrieve the code placed at the end of the context")
+				}
 				if err != nil {
-					return "", err
+					failures++
+					lastErr = err
+				} else {
+					passed++
 				}
-				if !strings.Contains(textContent(resp.Choices[0].Message.Content), canary) {
-					return "", errors.New("model did not retrieve the code placed at the end of the context")
-				}
-				return fmt.Sprintf("Retrieved the final marker from about %d tokens of generated context, estimated at four characters per token.", size/1024), nil
-			})
+			}
+			check := Check{ID: fmt.Sprintf("context.%dk", size/1024), Name: fmt.Sprintf("Context retrieval at about %dK tokens", size/1024), Status: "pass", Attempts: 3, Passed: passed, DurationMS: time.Since(startedContext).Milliseconds()}
+			if failures > 0 {
+				check.Status = "fail"
+				check.Error = Redact(lastErr.Error())
+				check.Evidence = fmt.Sprintf("Retrieved the final marker in %d of 3 attempts. Context size is estimated at four characters per token.", passed)
+			} else {
+				check.Evidence = "Retrieved the final marker in all 3 attempts. Context size is estimated at four characters per token."
+			}
+			report.Checks = append(report.Checks, check)
 		}
 	}
 	if options.Profile == "vision" || options.Profile == "full" {
@@ -215,20 +267,50 @@ func Run(ctx context.Context, options Options) (*Report, error) {
 			return "Identified the red pixel in a synthetic one pixel image.", nil
 		})
 	}
+	simulatedHarnessFailure := false
 	if options.Harness == "opencode" {
+		report.HarnessTimeoutMS = options.HarnessTimeout.Milliseconds()
+		startedBaseline := time.Now()
+		baselineEvidence, baselineErr := directOpenCodeBaseline(ctx, client, options.Timeout)
+		baseline := Check{ID: "harness.baseline", Name: "Direct fixture baseline", Status: "pass", DurationMS: time.Since(startedBaseline).Milliseconds(), Evidence: baselineEvidence}
+		if baselineErr != nil {
+			baseline.Status = "fail"
+			baseline.Error = Redact(baselineErr.Error())
+			baseline.Evidence = "The same fixture task did not complete through the provider directly."
+		}
+		report.Checks = append(report.Checks, baseline)
 		startedHarness := time.Now()
-		evidence, err := runOpenCode(ctx, client, model, options.Timeout)
+		var evidence string
+		var err error
+		if provider == "mock" && options.MockScenario == "harness-parser" && baseline.Status == "pass" {
+			simulatedHarnessFailure = true
+			evidence = "The mock scenario injected a harness parser failure after the direct baseline passed."
+			err = errors.New("simulated OpenCode tool parser failure")
+		} else {
+			evidence, err = runOpenCode(ctx, client, model, options.HarnessTimeout)
+		}
 		check := Check{ID: "harness.opencode", Name: "OpenCode execution", Status: "pass", DurationMS: time.Since(startedHarness).Milliseconds(), Evidence: evidence}
 		if err != nil {
 			check.Status = "fail"
 			check.Error = Redact(err.Error())
-			check.Evidence = "The controlled fixture was not completed through OpenCode."
+			if check.Evidence == "" {
+				check.Evidence = "The controlled fixture was not completed through OpenCode."
+			}
+			if errors.Is(err, context.DeadlineExceeded) || ctx.Err() == context.DeadlineExceeded {
+				check.Error = "OpenCode exceeded the configured harness timeout."
+			}
 		}
 		report.Checks = append(report.Checks, check)
 	}
 	report.Diagnoses = diagnose(report.Checks)
-	if report.Harness != "" {
+	if simulatedHarnessFailure {
+		report.Notes = append(report.Notes, "The parser finding came from a deterministic mock scenario. OpenCode was not launched.")
+	}
+	if report.Harness != "" && options.Harness == "opencode" && !simulatedHarnessFailure {
 		report.Notes = append(report.Notes, "The OpenCode check uses an isolated temporary project and configuration, and grants read access only to its fixture.")
+	}
+	if report.Harness != "" && options.Harness == "auto" {
+		report.Notes = append(report.Notes, "OpenCode was detected but not tested. Pass --harness opencode to run the fixture.")
 	}
 	if report.Harness == "" && options.Harness == "opencode" {
 		report.Notes = append(report.Notes, "OpenCode was requested but was not detected.")
@@ -250,7 +332,7 @@ func selectProvider(options Options) (*apiClient, string, string, func(), error)
 	name := strings.ToLower(options.Provider)
 	base, key, model := options.Endpoint, os.Getenv("OPENAI_API_KEY"), options.Model
 	if name == "mock" {
-		server := httptest.NewServer(mockHandler())
+		server := httptest.NewServer(mockHandler(options.MockScenario))
 		if model == "" {
 			model = "modelstackcheck-mock"
 		}
@@ -334,11 +416,41 @@ func diagnose(checks []Check) []Diagnosis {
 	if failed["tool.failure_recovery"] {
 		out = append(out, Diagnosis{Code: "MODEL_TOOL_SELECTION", Confidence: "medium", Summary: "The model did not recover cleanly after a tool error.", Evidence: []string{"The simulated missing file error was not handled as expected."}, Recommendation: "Use clearer tool error messages or a model with stronger tool recovery behavior."})
 	}
-	if failed["harness.opencode"] {
+	if failed["tool.enum"] {
+		out = append(out, Diagnosis{Code: "MODEL_ENUM_FAILURE", Confidence: "medium", Summary: "The model did not select a supported value from the tool schema.", Evidence: []string{"The enum selection probe failed."}, Recommendation: "Use a model that follows constrained tool arguments reliably or simplify the enum schema."})
+	}
+	if failed["tool.file_edit"] {
+		out = append(out, Diagnosis{Code: "MODEL_FILE_EDIT_FAILURE", Confidence: "medium", Summary: "The model could not produce and apply the requested edit in a temporary project.", Evidence: []string{"The file edit did not match the expected fixture change."}, Recommendation: "Check the model's edit tool format and repeat the task on a temporary project."})
+	}
+	if failed["tool.shell"] {
+		out = append(out, Diagnosis{Code: "MODEL_SHELL_FAILURE", Confidence: "medium", Summary: "The model did not request the permitted shell operation correctly.", Evidence: []string{"The restricted shell probe failed within its temporary fixture."}, Recommendation: "Check shell tool argument formatting and keep commands restricted to a reviewed allowlist."})
+	}
+	checksByID := map[string]Check{}
+	for _, check := range checks {
+		checksByID[check.ID] = check
+	}
+	if failed["harness.opencode"] && checksByID["harness.baseline"].Status == "pass" {
+		if strings.Contains(checksByID["harness.opencode"].Error, "harness timeout") {
+			out = append(out, Diagnosis{Code: "HARNESS_TIMEOUT", Confidence: "high", Summary: "The provider completed the fixture directly, but OpenCode exceeded its timeout.", Evidence: []string{"The direct fixture baseline passed and the OpenCode fixture timed out."}, Recommendation: "Raise the OpenCode provider timeout or use a faster model, then repeat the harness check."})
+		} else if strings.Contains(checksByID["harness.opencode"].Error, "OpenCode CLI was not found") {
+			out = append(out, Diagnosis{Code: "HARNESS_NOT_FOUND", Confidence: "high", Summary: "The provider passed the direct fixture, but the OpenCode command is not installed or available on PATH.", Evidence: []string{"The direct fixture baseline passed and OpenCode could not be launched."}, Recommendation: "Install OpenCode or add its command to PATH, then repeat the harness check."})
+		} else {
+			out = append(out, Diagnosis{Code: "HARNESS_TOOL_PARSER", Confidence: "medium", Summary: "The provider completed the fixture directly, but OpenCode could not complete the same tool task.", Evidence: []string{"The direct fixture baseline passed and the OpenCode fixture failed."}, Recommendation: "Check OpenCode tool call parsing and provider compatibility, then repeat the same fixture through both paths."})
+		}
+	} else if failed["harness.opencode"] {
 		out = append(out, Diagnosis{Code: "HARNESS_EXECUTION", Confidence: "high", Summary: "The controlled tool call did not complete through OpenCode.", Evidence: []string{"The check used a temporary project and a provider fixture."}, Recommendation: "Compare the OpenCode model and provider settings with the direct provider results, then repeat the harness check."})
 	}
-	if failed["context.8k"] || failed["context.32k"] {
-		out = append(out, Diagnosis{Code: "CONTEXT_RETRIEVAL", Confidence: "medium", Summary: "The model did not retrieve a marker placed at the end of a long prompt.", Evidence: []string{"The context probe failed at one or more requested sizes."}, Recommendation: "Lower the prompt size or raise the provider context limit, then repeat the same retrieval check."})
+	if failed["context.16k"] && failed["context.32k"] {
+		out = append(out, Diagnosis{Code: "CONTEXT_RETRIEVAL", Confidence: "medium", Summary: "The model did not reliably retrieve a marker placed at the end of a long prompt.", Evidence: []string{"The 16K and 32K context probes failed."}, Recommendation: "Lower the prompt size or raise the provider context limit, then repeat the same retrieval check."})
+	} else if failed["context.32k"] && !failed["context.16k"] {
+		c16, c32 := checksByID["context.16k"], checksByID["context.32k"]
+		confidence := "medium"
+		if c16.Attempts >= 3 && c16.Passed == c16.Attempts && c32.Attempts >= 3 && c32.Passed == 0 {
+			confidence = "high"
+		}
+		out = append(out, Diagnosis{Code: "MODEL_CONTEXT_DEGRADATION", Confidence: confidence, Summary: "The model retrieved the marker at 16K but not reliably at 32K.", Evidence: []string{fmt.Sprintf("16K retrieval passed %d of %d attempts.", c16.Passed, c16.Attempts), fmt.Sprintf("32K retrieval passed %d of %d attempts.", c32.Passed, c32.Attempts)}, Recommendation: "Set the context limit near the largest size that passed consistently, then confirm it with the task that first failed."})
+	} else if failed["context.16k"] {
+		out = append(out, Diagnosis{Code: "CONTEXT_RETRIEVAL", Confidence: "medium", Summary: "The model did not reliably retrieve a marker at 16K context.", Evidence: []string{"The 16K context probe failed."}, Recommendation: "Lower the prompt size or check the provider context limit, then repeat the retrieval check."})
 	}
 	if failed["vision.image_input"] {
 		out = append(out, Diagnosis{Code: "PROVIDER_VISION", Confidence: "medium", Summary: "The model did not identify the image sent with the request.", Evidence: []string{"The synthetic image recognition probe failed."}, Recommendation: "Choose a vision enabled model and confirm the provider supports image input."})
@@ -380,13 +492,17 @@ func contains(items []string, target string) bool {
 	return false
 }
 
-func ServeMock(address string) error {
-	server := &http.Server{Addr: address, Handler: mockHandler(), ReadHeaderTimeout: 5 * time.Second}
+func ServeMock(address string, scenarios ...string) error {
+	scenario := "normal"
+	if len(scenarios) > 0 {
+		scenario = scenarios[0]
+	}
+	server := &http.Server{Addr: address, Handler: mockHandler(scenario), ReadHeaderTimeout: 5 * time.Second}
 	fmt.Printf("Mock provider listening at http://%s/v1\n", address)
 	return server.ListenAndServe()
 }
 
-func mockHandler() http.Handler {
+func mockHandler(scenario string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{{"id": "modelstackcheck-mock", "object": "model"}}})
@@ -397,6 +513,23 @@ func mockHandler() http.Handler {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
+		if scenario == "rate-limit" {
+			http.Error(w, "rate limit", http.StatusTooManyRequests)
+			return
+		}
+		if scenario == "server-error" {
+			http.Error(w, "provider error", http.StatusInternalServerError)
+			return
+		}
+		if scenario == "slow" || (scenario == "harness-timeout" && hasOpenCodeToolResult(request.Messages)) {
+			timer := time.NewTimer(2 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		if request.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
@@ -404,6 +537,15 @@ func mockHandler() http.Handler {
 			return
 		}
 		answer := mockAnswer(request)
+		if scenario == "malformed-tool" && len(request.Tools) > 0 {
+			answer = message{Role: "assistant", ToolCalls: []toolCall{{ID: "malformed", Type: "function", Function: calledFunction{Name: request.Tools[0].Function.Name, Arguments: "{"}}}}
+		}
+		if scenario == "tool-failure" && len(request.Tools) > 0 {
+			answer = message{Role: "assistant", Content: "I cannot call a tool."}
+		}
+		if scenario == "context-degradation" && strings.Contains(strings.ToLower(textContent(request.Messages[len(request.Messages)-1].Content)), "mdoc_context_canary_7f3a") && len(textContent(request.Messages[len(request.Messages)-1].Content)) > 100000 {
+			answer = message{Role: "assistant", Content: "I cannot locate the marker."}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": answer}}})
 	})
@@ -470,6 +612,12 @@ func mockAnswer(req chatRequest) message {
 		calls = append(calls, toolCall{ID: fmt.Sprintf("call_%d", len(calls)+1), Type: "function", Function: calledFunction{Name: name, Arguments: args}})
 	}
 	switch {
+	case strings.Contains(text, "choose a mode"):
+		add("set_mode", `{"mode":"read"}`)
+	case strings.Contains(text, "change hello()"):
+		add("edit_file", `{"path":"main.py","old":"return \"hello\"","new":"return \"Hello, world!\""}`)
+	case strings.Contains(text, "list files in the directory"):
+		add("run_command", `{"command":"ls"}`)
 	case strings.Contains(text, "inspect_profile") || strings.Contains(text, "profile name ada"):
 		add("inspect_profile", `{"profile":{"name":"Ada","settings":{"theme":"dark"}}}`)
 	case strings.Contains(text, "both tools") || strings.Contains(text, "readme.md and search"):
@@ -505,6 +653,88 @@ func mockAnswer(req chatRequest) message {
 	return message{Role: "assistant", ToolCalls: calls, Content: "All requested checks completed."}
 }
 
+func editFixtureWithModel(ctx context.Context, client *apiClient) (string, error) {
+	root, err := os.MkdirTemp("", "modelstackcheck-edit-")
+	if err != nil {
+		return "", errors.New("could not create the file edit fixture")
+	}
+	defer os.RemoveAll(root)
+	path := filepath.Join(root, "main.py")
+	const original = "def hello():\n    return \"hello\"\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		return "", errors.New("could not create the file edit fixture")
+	}
+	resp, err := client.chat(ctx, []message{{Role: "user", Content: "Change hello() so it returns \"Hello, world!\". Use edit_file on main.py and replace only the return value."}}, makeTools("edit_file"), false)
+	if err != nil {
+		return "", err
+	}
+	calls := resp.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].Function.Name != "edit_file" || !callIsValid(calls[0]) {
+		return "", errors.New("model did not return a valid file edit")
+	}
+	var args struct {
+		Path string `json:"path"`
+		Old  string `json:"old"`
+		New  string `json:"new"`
+	}
+	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil || args.Path != "main.py" || args.Old != `return "hello"` || args.New != `return "Hello, world!"` {
+		return "", errors.New("model returned an unsafe or incorrect file edit")
+	}
+	current, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(current, []byte(args.Old)) {
+		return "", errors.New("file edit did not match the fixture content")
+	}
+	updated := bytes.Replace(current, []byte(args.Old), []byte(args.New), 1)
+	if err := os.WriteFile(path, updated, 0600); err != nil {
+		return "", errors.New("could not apply the fixture file edit")
+	}
+	verified, err := os.ReadFile(path)
+	if err != nil || !bytes.Contains(verified, []byte(`return "Hello, world!"`)) || bytes.Contains(verified, []byte(args.Old)) {
+		return "", errors.New("edited fixture did not match the requested result")
+	}
+	return "Updated and verified main.py inside a temporary fixture project.", nil
+}
+
+func listFixtureWithModel(ctx context.Context, client *apiClient) (string, error) {
+	root, err := os.MkdirTemp("", "modelstackcheck-shell-")
+	if err != nil {
+		return "", errors.New("could not create the shell fixture")
+	}
+	defer os.RemoveAll(root)
+	for _, name := range []string{"README.md", "main.py"} {
+		if err := os.WriteFile(filepath.Join(root, name), nil, 0600); err != nil {
+			return "", errors.New("could not create the shell fixture")
+		}
+	}
+	resp, err := client.chat(ctx, []message{{Role: "user", Content: "List files in the directory by calling run_command with the permitted command ls."}}, makeTools("run_command"), false)
+	if err != nil {
+		return "", err
+	}
+	calls := resp.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].Function.Name != "run_command" || !callIsValid(calls[0]) {
+		return "", errors.New("model did not request the permitted file listing command")
+	}
+	var args map[string]any
+	_ = json.Unmarshal([]byte(calls[0].Function.Arguments), &args)
+	if args["command"] != "ls" {
+		return "", errors.New("model requested a command outside the safe fixture allowlist")
+	}
+	var output []byte
+	if runtime.GOOS == "windows" {
+		output, err = exec.CommandContext(ctx, "cmd.exe", "/d", "/c", "dir", "/b", root).Output()
+	} else {
+		output, err = exec.CommandContext(ctx, "ls", "-1", root).Output()
+	}
+	if err != nil {
+		return "", errors.New("could not list fixture files")
+	}
+	entries := strings.FieldsFunc(string(output), func(r rune) bool { return r == '\n' || r == '\r' })
+	if len(entries) != 2 || !contains(entries, "README.md") || !contains(entries, "main.py") {
+		return "", errors.New("restricted file listing returned an unexpected result")
+	}
+	return "Requested the allowlisted ls operation and verified the two fixture files inside the temporary project.", nil
+}
+
 func textContent(value any) string {
 	switch content := value.(type) {
 	case string:
@@ -534,6 +764,53 @@ func syntheticRedPNG() string {
 	var data bytes.Buffer
 	_ = png.Encode(&data, img)
 	return base64.StdEncoding.EncodeToString(data.Bytes())
+}
+
+func hasOpenCodeToolResult(messages []message) bool {
+	for _, msg := range messages {
+		content := textContent(msg.Content)
+		if msg.Role == "tool" && strings.Contains(content, "MDOC_OPENCODE_CANARY") && !isDirectFixtureBaseline(messages) {
+			return true
+		}
+	}
+	return false
+}
+
+func isDirectFixtureBaseline(messages []message) bool {
+	for _, msg := range messages {
+		if msg.Role == "system" && msg.Content == "ModelStackCheck direct fixture baseline" {
+			return true
+		}
+	}
+	return false
+}
+
+func directOpenCodeBaseline(ctx context.Context, client *apiClient, timeout time.Duration) (string, error) {
+	const prompt = "Read fixture.txt and return the exact marker that it contains."
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	baseline := message{Role: "system", Content: "ModelStackCheck direct fixture baseline"}
+	first, err := client.chat(probeCtx, []message{baseline, {Role: "user", Content: prompt}}, makeTools("read_file"), false)
+	if err != nil {
+		return "", err
+	}
+	calls := first.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].Function.Name != "read_file" || !callIsValid(calls[0]) {
+		return "", errors.New("provider did not make a valid direct fixture read call")
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &args); err != nil || args["path"] != "fixture.txt" {
+		return "", errors.New("provider requested the wrong direct fixture path")
+	}
+	const canary = "MDOC_OPENCODE_CANARY_91C4"
+	second, err := client.chat(probeCtx, []message{baseline, {Role: "user", Content: prompt}, {Role: "assistant", ToolCalls: calls}, {Role: "tool", ToolCallID: calls[0].ID, Content: canary}}, nil, false)
+	if err != nil {
+		return "", err
+	}
+	if !strings.Contains(textContent(second.Choices[0].Message.Content), canary) {
+		return "", errors.New("provider did not return the direct fixture marker")
+	}
+	return "The provider called read_file correctly and returned the fixture marker after the tool result.", nil
 }
 
 func runOpenCode(ctx context.Context, client *apiClient, model string, timeout time.Duration) (string, error) {
@@ -576,20 +853,37 @@ func runOpenCode(ctx context.Context, client *apiClient, model string, timeout t
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(probeCtx, path, "run", "--pure", "--agent", "plan", "--model", "modelstackcheck/"+providerModel, "--format", "json", "--dir", project, "Read fixture.txt and return the exact marker that it contains. Include MDOC_OPENCODE_CANARY in your tool call plan.")
+	cmd := exec.CommandContext(probeCtx, path, "run", "--pure", "--agent", "plan", "--model", "modelstackcheck/"+providerModel, "--format", "json", "--dir", project, "Read fixture.txt and return the exact marker that it contains.")
 	cmd.Dir = project
 	cmd.Env = isolatedEnv(os.Environ(), map[string]string{"OPENCODE_CONFIG": configPath, "OPENCODE_CONFIG_DIR": root, "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1", "HOME": root, "USERPROFILE": root, "XDG_CONFIG_HOME": root, "XDG_DATA_HOME": root, "APPDATA": root})
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if probeCtx.Err() != nil {
-			return "", errors.New("OpenCode did not finish the read only fixture before the timeout")
+			return "", errors.New("OpenCode exceeded the configured harness timeout")
 		}
 		return "", errors.New("OpenCode could not complete the read only fixture")
 	}
-	if !strings.Contains(string(output), canary) {
+	if !strings.Contains(openCodeFinalText(output), canary) {
 		return "", errors.New("OpenCode did not return the fixture marker")
 	}
 	return "OpenCode read the temporary fixture through the selected provider and returned its marker.", nil
+}
+
+func openCodeFinalText(output []byte) string {
+	var text strings.Builder
+	for _, line := range strings.Split(string(output), "\n") {
+		var event struct {
+			Type string `json:"type"`
+			Part struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"part"`
+		}
+		if json.Unmarshal([]byte(line), &event) == nil && event.Type == "text" && event.Part.Type == "text" {
+			text.WriteString(event.Part.Text)
+		}
+	}
+	return text.String()
 }
 
 func isolatedEnv(environment []string, replacements map[string]string) []string {
