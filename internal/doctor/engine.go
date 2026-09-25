@@ -126,7 +126,10 @@ func Run(ctx context.Context, options Options) (*Report, error) {
 		return "Received a text event before the stream ended.", nil
 	})
 	runProbe("tool.basic", "Basic tool call", func(c context.Context) (string, error) {
-		resp, err := client.chat(c, []message{{Role: "user", Content: "Call read_file with path README.md."}}, makeTools("read_file"), false)
+		resp, err := client.chat(c, []message{
+			{Role: "system", Content: "You are being tested for structured tool calling. Use the requested tool with its exact arguments. Do not answer in plain text."},
+			{Role: "user", Content: "Call read_file exactly once with path set to README.md."},
+		}, makeTools("read_file"), false)
 		if err != nil {
 			return "", err
 		}
@@ -614,7 +617,7 @@ func mockAnswer(req chatRequest) message {
 	switch {
 	case strings.Contains(text, "choose a mode"):
 		add("set_mode", `{"mode":"read"}`)
-	case strings.Contains(text, "change hello()"):
+	case strings.Contains(text, "change hello()") || strings.Contains(text, "replace exactly return"):
 		add("edit_file", `{"path":"main.py","old":"return \"hello\"","new":"return \"Hello, world!\""}`)
 	case strings.Contains(text, "list files in the directory"):
 		add("run_command", `{"command":"ls"}`)
@@ -664,7 +667,10 @@ func editFixtureWithModel(ctx context.Context, client *apiClient) (string, error
 	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
 		return "", errors.New("could not create the file edit fixture")
 	}
-	resp, err := client.chat(ctx, []message{{Role: "user", Content: "Change hello() so it returns \"Hello, world!\". Use edit_file on main.py and replace only the return value."}}, makeTools("edit_file"), false)
+	resp, err := client.chat(ctx, []message{
+		{Role: "system", Content: "You are being tested for structured tool calling. Use the requested tool and provide its exact arguments. Do not answer in plain text."},
+		{Role: "user", Content: `Use edit_file to update main.py. Replace exactly return "hello" with return "Hello, world!" and change nothing else.`},
+	}, makeTools("edit_file"), false)
 	if err != nil {
 		return "", err
 	}
@@ -828,8 +834,13 @@ func runOpenCode(ctx context.Context, client *apiClient, model string, timeout t
 		return "", errors.New("could not create the isolated OpenCode project")
 	}
 	const canary = "MDOC_OPENCODE_CANARY_91C4"
-	if err := os.WriteFile(filepath.Join(project, "fixture.txt"), []byte(canary+"\n"), 0600); err != nil {
+	fixture := filepath.Join(project, "fixture.txt")
+	if err := os.WriteFile(fixture, []byte(canary+"\n"), 0600); err != nil {
 		return "", errors.New("could not create the isolated OpenCode fixture")
+	}
+	if resolved, err := filepath.EvalSymlinks(project); err == nil {
+		project = resolved
+		fixture = filepath.Join(project, "fixture.txt")
 	}
 	providerModel := model
 	if providerModel == "" {
@@ -853,7 +864,8 @@ func runOpenCode(ctx context.Context, client *apiClient, model string, timeout t
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(probeCtx, path, "run", "--pure", "--agent", "plan", "--model", "modelstackcheck/"+providerModel, "--format", "json", "--dir", project, "Read fixture.txt and return the exact marker that it contains.")
+	prompt := fmt.Sprintf("Read the fixture at this exact path %s and return the exact marker it contains.", fixture)
+	cmd := exec.CommandContext(probeCtx, path, "run", "--pure", "--agent", "plan", "--model", "modelstackcheck/"+providerModel, "--format", "json", "--dir", project, prompt)
 	cmd.Dir = project
 	cmd.Env = isolatedEnv(os.Environ(), map[string]string{"OPENCODE_CONFIG": configPath, "OPENCODE_CONFIG_DIR": root, "OPENCODE_DISABLE_MODELS_FETCH": "1", "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1", "HOME": root, "USERPROFILE": root, "XDG_CONFIG_HOME": root, "XDG_DATA_HOME": root, "APPDATA": root})
 	output, err := cmd.CombinedOutput()

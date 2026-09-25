@@ -115,6 +115,27 @@ func TestOpenCodeVerificationRequiresFinalAssistantText(t *testing.T) {
 	}
 }
 
+func TestEditFixtureRequestsStructuredToolCall(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request chatRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode edit request: %v", err)
+		}
+		if len(request.Messages) != 2 || !strings.Contains(textContent(request.Messages[0].Content), "structured tool calling") || !strings.Contains(textContent(request.Messages[1].Content), `Replace exactly return "hello"`) {
+			t.Errorf("edit request did not provide exact tool instructions: %+v", request.Messages)
+		}
+		response := map[string]any{"choices": []any{map[string]any{"message": message{Role: "assistant", ToolCalls: []toolCall{{ID: "edit", Type: "function", Function: calledFunction{Name: "edit_file", Arguments: `{"path":"main.py","old":"return \"hello\"","new":"return \"Hello, world!\""}`}}}}}}}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("encode edit response: %v", err)
+		}
+	}))
+	defer server.Close()
+	client := &apiClient{base: server.URL, model: "fixture-model", http: server.Client()}
+	if _, err := editFixtureWithModel(context.Background(), client); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReportsShowHarnessTimeoutAndRepeatedContextResults(t *testing.T) {
 	report := &Report{HarnessTimeoutMS: 300, Checks: []Check{{Name: "Context", Status: "pass", Attempts: 3, Passed: 2}}}
 	for name, rendered := range map[string]string{"text": Text(report), "markdown": Markdown(report)} {
