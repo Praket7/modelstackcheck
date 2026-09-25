@@ -1,9 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title">
-  <title id="title">ModelStackCheck mark</title>
-  <rect width="128" height="128" rx="32" fill="#13212a"/>
-  <path d="M32 35v26a32 32 0 0 0 64 0V35" fill="none" stroke="#63d8b1" stroke-linecap="round" stroke-width="8"/>
-  <circle cx="32" cy="31" r="8" fill="#eff7f2"/>
-  <circle cx="96" cy="31" r="8" fill="#eff7f2"/>
-  <path d="M64 93v5a13 13 0 1 0 13-13h-8" fill="none" stroke="#eff7f2" stroke-linecap="round" stroke-linejoin="round" stroke-width="7"/>
-  <circle cx="62" cy="84" r="5" fill="#f0bf72"/>
-</svg>
