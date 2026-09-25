@@ -8,7 +8,7 @@ ModelStackCheck helps you find where a coding model setup breaks, and it points 
 
 ## Try it
 
-Download [version 0.1.2 alpha](https://github.com/Praket7/modelstackcheck/releases/tag/v0.1.2-alpha) for your computer, and run a private demo with no model account.
+Download [version 0.1.3 alpha](https://github.com/Praket7/modelstackcheck/releases/tag/v0.1.3-alpha) for your computer, and run a private demo with no model account.
 
 ```sh
 modelstackcheck doctor --provider mock
@@ -90,5 +90,3 @@ go build -o modelstackcheck ./cmd/modelstackcheck
 ## Project
 
 ModelStackCheck is open source under the MIT license, and contributions are welcome. Read the [build notes](BUILD.md), [contribution guide](CONTRIBUTING.md), and [security policy](SECURITY.md) before sending a change.
-
-The name passed a preliminary search across source repositories and package registries, but it still needs a formal trademark review before commercial use.
